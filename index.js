@@ -1,6 +1,7 @@
 const dotenv = require('dotenv')
 dotenv.config()
 
+const crypto = require('crypto')
 const Redis = require("ioredis")
 
 async function main() {
@@ -17,7 +18,7 @@ async function main() {
                 name: 'emailA',
                 limit: 5,
                 refillCount: 2,
-                refillIntervalMs: 30 * 1000,
+                refillIntervalMs: 5 * 1000,
             },
             // {
             //     name: 'emailB',
@@ -39,8 +40,12 @@ async function main() {
     const rateLimiter = new RateLimiter(config)
     await rateLimiter.start()
 
+    const rateLimiterB = new RateLimiter(config)
+    await rateLimiterB.start()
+
     await Promise.allSettled([
         runScenario(rateLimiter, 'emailA'),
+        runScenario(rateLimiterB, 'emailA'),
         // runScenario(rateLimiter, 'emailB'),
         // runScenario(rateLimiter, 'emailC'),
     ])
@@ -55,7 +60,7 @@ async function runScenario(rateLimiter, key) {
     await consume(6, rateLimiter, key)
 
     logWithTimestamp(`${key} - Sleep for 5s`)
-    await sleep(5000)
+    await sleep(15000)
 
     // await consume(7, rateLimiter, key)
     // await consume(8, rateLimiter, key)
@@ -89,7 +94,6 @@ async function consume(id, rateLimiter, email) {
     logWithTimestamp({ id: 
         `${email}-${id}`, 
         result, 
-        tokens: await rateLimiter.redis.hget(`rate-limiter:${email}`, 'tokens') 
     })
 }
 
@@ -126,71 +130,67 @@ class RateLimiter {
                 }
             }
 
-            let refillTokenIntervalFunction = null
-            let needToResetInitialTimeout = true
-
-            // Use timeout for the first refill to avoid it running many times if the interval is too short
-            refillTokenIntervalFunction = setTimeout(() => {
-                return this.refillTokens({
-                    config: finalEmailConfig,
-                    onSuccess: async () => {
-                        if (needToResetInitialTimeout) {
-                            logWithTimestamp(`${finalEmailConfig.name} - RESET INTERVAL`)
-                            clearInterval(refillTokenIntervalFunction)
-
-                            needToResetInitialTimeout = false
-                            refillTokenIntervalFunction = setInterval(
-                                () => this.refillTokens({ config: finalEmailConfig }), 
-                                finalEmailConfig.refillIntervalMs,
-                            )
-                        }
-                    }
-                })
+            setTimeout(async () => {
+                await this.refillTokensAndTriggerAgainWithTimeout(finalEmailConfig)
             }, initialTimeout)
         }
     }
 
-    async refillTokens(props) {
-        const {
-            config,
-            onSuccess
-        } = props
-
+    async refillTokens(config) {
         logWithTimestamp(`${config.name} - REFILL TOKENS`)
 
+        const currentTimestamp = new Date()
         const lockKey = this.generateRefillLockKey(config.name)
-        const lockExpirationTimeMs = 20 * 1000 
-        const lock = await this.redis.set(lockKey, "lock", 'NX', 'PX', lockExpirationTimeMs)
-        
-        if (lock !== 'OK') {
-            logWithTimestamp("OTHER PROCESS IS REFILLING TOKENS")
-            return
-        }
 
-        const stateKey = this.generateKey(config.name)
-        const state = await this.redis.hgetall(stateKey)
-        let configKeyCount = Object.keys(config).length 
-
-        if (Object.keys(state).length < configKeyCount) {
-            logWithTimestamp("STATE IS EMPTY WHILE REFILLING")
-
-            await this.redis.hset(stateKey, this.generateInitialConfig(config))
-        } else {
-            let newCurrentLimit = parseInt(state.refillCount) + parseInt(state.tokens)
-
-            if (parseInt(state.tokens) < 0) {
-                newCurrentLimit = parseInt(state.refillCount)
+        try {
+            const lockExpirationTimeMs = 20 * 1000 
+            const lock = await this.redis.set(lockKey, "lock", 'NX', 'PX', lockExpirationTimeMs)
+            
+            if (lock !== 'OK') {
+                logWithTimestamp("OTHER PROCESS IS REFILLING TOKENS")
+                return
             }
 
-            if (newCurrentLimit > parseInt(state.limit)) {
-                newCurrentLimit = parseInt(state.limit)
+            const stateKey = this.generateKey(config.name)
+            const state = await this.redis.hgetall(stateKey)
+            let configKeyCount = Object.keys(config).length 
+
+            if (Object.keys(state).length < configKeyCount) {
+                logWithTimestamp("STATE IS EMPTY WHILE REFILLING")
+    
+                await this.redis.hset(stateKey, this.generateInitialConfig(config))
+            } else {
+                const lastRefilledAt = new Date(state.refilledAt)
+                const timeDiff = currentTimestamp - lastRefilledAt
+    
+                if (timeDiff < config.refillIntervalMs) {
+                    logWithTimestamp("SKIP REFILL. INTERVAL NOT YET REACHED")
+                    return
+                }
+    
+                let newCurrentLimit = parseInt(state.refillCount) + parseInt(state.tokens)
+    
+                if (parseInt(state.tokens) < 0) {
+                    newCurrentLimit = parseInt(state.refillCount)
+                }
+    
+                if (newCurrentLimit > parseInt(state.limit)) {
+                    newCurrentLimit = parseInt(state.limit)
+                }
+    
+                await this.redis.hset(stateKey, 'tokens', newCurrentLimit, 'refilledAt', new Date().toISOString())
             }
-
-            await this.redis.hset(stateKey, 'tokens', newCurrentLimit, 'refilledAt', new Date().toISOString())
+        } finally {
+            await this.redis.del(lockKey)
         }
+    }
+    
+    async refillTokensAndTriggerAgainWithTimeout(config) {
+        await this.refillTokens(config)
 
-        await this.redis.del(lockKey)
-        await onSuccess()
+        setTimeout(async () => {
+            await this.refillTokensAndTriggerAgainWithTimeout(config)
+        }, config.refillIntervalMs)
     }
 
     generateInitialConfig(config) {
