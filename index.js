@@ -17,32 +17,32 @@ async function main() {
                 name: 'emailA',
                 limit: 5,
                 refillCount: 2,
-                refillIntervalMs: 5 * 1000,
+                refillIntervalMs: 30 * 1000,
             },
-            {
-                name: 'emailB',
-                limit: 5,
-                refillCount: 3,
-                refillIntervalMs: 5 * 1000,
-            },
-            {
-                name: 'emailC',
-                limit: 5,
-                refillCount: 2,
-                refillIntervalMs: 2 * 1000,
-            }
+            // {
+            //     name: 'emailB',
+            //     limit: 5,
+            //     refillCount: 3,
+            //     refillIntervalMs: 5 * 1000,
+            // },
+            // {
+            //     name: 'emailC',
+            //     limit: 5,
+            //     refillCount: 2,
+            //     refillIntervalMs: 2 * 1000,
+            // }
         ]
     }
 
-    await deleteAllKeys(redis, config)
+    // await deleteAllKeys(redis, config)
 
     const rateLimiter = new RateLimiter(config)
     await rateLimiter.start()
 
     await Promise.allSettled([
         runScenario(rateLimiter, 'emailA'),
-        runScenario(rateLimiter, 'emailB'),
-        runScenario(rateLimiter, 'emailC'),
+        // runScenario(rateLimiter, 'emailB'),
+        // runScenario(rateLimiter, 'emailC'),
     ])
 }
 
@@ -57,22 +57,22 @@ async function runScenario(rateLimiter, key) {
     logWithTimestamp(`${key} - Sleep for 5s`)
     await sleep(5000)
 
-    await consume(7, rateLimiter, key)
-    await consume(8, rateLimiter, key)
-    await consume(9, rateLimiter, key)
-    await consume(10, rateLimiter, key)
-    await consume(11, rateLimiter, key)
-    await consume(12, rateLimiter, key)
+    // await consume(7, rateLimiter, key)
+    // await consume(8, rateLimiter, key)
+    // await consume(9, rateLimiter, key)
+    // await consume(10, rateLimiter, key)
+    // await consume(11, rateLimiter, key)
+    // await consume(12, rateLimiter, key)
 
-    logWithTimestamp(`${key} - Sleep for 5s`)
-    await sleep(5000)
+    // logWithTimestamp(`${key} - Sleep for 5s`)
+    // await sleep(5000)
 
-    await consume(13, rateLimiter, key)
-    await consume(14, rateLimiter, key)
-    await consume(15, rateLimiter, key)
-    await consume(16, rateLimiter, key)
-    await consume(17, rateLimiter, key)
-    await consume(18, rateLimiter, key)
+    // await consume(13, rateLimiter, key)
+    // await consume(14, rateLimiter, key)
+    // await consume(15, rateLimiter, key)
+    // await consume(16, rateLimiter, key)
+    // await consume(17, rateLimiter, key)
+    // await consume(18, rateLimiter, key)
 
     logWithTimestamp(`${key} - Finish`)
 } 
@@ -105,77 +105,97 @@ class RateLimiter {
     }
 
     async start() {
-        for (const email of this.emails) {
-            const key = this.generateKey(email.name)
-            const value = await this.redis.hgetall(key)
-            let finalEmailConfig = null
+        const currentTimestamp = new Date()
 
-            if (Object.keys(value).length === 0) {
+        for (const email of this.emails) {
+            // TODO lock start so only 1 process can start
+            const key = this.generateKey(email.name)
+            let finalEmailConfig = await this.redis.hgetall(key)
+            let initialTimeout = 0
+
+            if (Object.keys(finalEmailConfig).length === 0) {
                 finalEmailConfig =  this.generateInitialConfig(email)
+                initialTimeout = finalEmailConfig.refillIntervalMs
 
                 await this.redis.hset(key, finalEmailConfig)
+            } else {
+                initialTimeout = parseInt(finalEmailConfig.refillIntervalMs) - (currentTimestamp - new Date(finalEmailConfig.refilledAt))
+    
+                if (initialTimeout < 0) {
+                    initialTimeout = 0
+                }
             }
-            
+
             let refillTokenIntervalFunction = null
-            let needToResetRefillInitialInterval = true
-            let configKeyCount = Object.keys(finalEmailConfig).length 
+            let needToResetInitialTimeout = true
 
-            async function refillToken() {
-                logWithTimestamp(`${email.name} - REFILL TOKENS`)
+            // Use timeout for the first refill to avoid it running many times if the interval is too short
+            refillTokenIntervalFunction = setTimeout(() => {
+                return this.refillTokens({
+                    config: finalEmailConfig,
+                    onSuccess: async () => {
+                        if (needToResetInitialTimeout) {
+                            logWithTimestamp(`${finalEmailConfig.name} - RESET INTERVAL`)
+                            clearInterval(refillTokenIntervalFunction)
 
-                const lockKey = this.generateRefillLockKey(email.name)
-                const lockExpirationTimeMs = 20 * 1000 
-                const lock = await this.redis.set(lockKey, "lock", 'NX', 'PX', lockExpirationTimeMs)
-                
-                if (lock !== 'OK') {
-                    logWithTimestamp("OTHER PROCESS IS REFILLING TOKENS")
-                    return
-                }
-
-                const state = await this.redis.hgetall(key)
-
-                if (Object.keys(state).length < configKeyCount) {
-                    logWithTimestamp("STATE IS EMPTY WHILE REFILLING")
-
-                    await this.redis.hset(key, this.generateInitialConfig(email))
-                } else {
-                    let newCurrentLimit = parseInt(state.refillCount) + parseInt(state.tokens)
-
-                    if (parseInt(state.tokens) < 0) {
-                        newCurrentLimit = parseInt(state.refillCount)
+                            needToResetInitialTimeout = false
+                            refillTokenIntervalFunction = setInterval(
+                                () => this.refillTokens({ config: finalEmailConfig }), 
+                                finalEmailConfig.refillIntervalMs,
+                            )
+                        }
                     }
-    
-                    if (newCurrentLimit > parseInt(state.limit)) {
-                        newCurrentLimit = parseInt(state.limit)
-                    }
-    
-    
-                    await this.redis.hset(key, 'tokens', newCurrentLimit, 'refilledAt', new Date().toISOString())
-                }
-
-                await this.redis.del(this.generateRefillLockKey(email.name))
-
-                if (needToResetRefillInitialInterval) {
-                    logWithTimestamp(`${email.name} - RESET INTERVAL`)
-                    clearInterval(refillTokenIntervalFunction)
-                    needToResetRefillInitialInterval = false
-                    refillTokenIntervalFunction = setInterval(refillToken.bind(this), finalEmailConfig.refillIntervalMs)
-                }
-            }
-
-            let initialInterval = (new Date() - new Date(finalEmailConfig.refilledAt)) - finalEmailConfig.refillIntervalMs
-
-            if (initialInterval <= 0) {
-                initialInterval = finalEmailConfig.refillIntervalMs
-                needToResetRefillInitialInterval = false
-            }
-
-            refillTokenIntervalFunction = setInterval(refillToken.bind(this), initialInterval)
+                })
+            }, initialTimeout)
         }
+    }
+
+    async refillTokens(props) {
+        const {
+            config,
+            onSuccess
+        } = props
+
+        logWithTimestamp(`${config.name} - REFILL TOKENS`)
+
+        const lockKey = this.generateRefillLockKey(config.name)
+        const lockExpirationTimeMs = 20 * 1000 
+        const lock = await this.redis.set(lockKey, "lock", 'NX', 'PX', lockExpirationTimeMs)
+        
+        if (lock !== 'OK') {
+            logWithTimestamp("OTHER PROCESS IS REFILLING TOKENS")
+            return
+        }
+
+        const stateKey = this.generateKey(config.name)
+        const state = await this.redis.hgetall(stateKey)
+        let configKeyCount = Object.keys(config).length 
+
+        if (Object.keys(state).length < configKeyCount) {
+            logWithTimestamp("STATE IS EMPTY WHILE REFILLING")
+
+            await this.redis.hset(stateKey, this.generateInitialConfig(config))
+        } else {
+            let newCurrentLimit = parseInt(state.refillCount) + parseInt(state.tokens)
+
+            if (parseInt(state.tokens) < 0) {
+                newCurrentLimit = parseInt(state.refillCount)
+            }
+
+            if (newCurrentLimit > parseInt(state.limit)) {
+                newCurrentLimit = parseInt(state.limit)
+            }
+
+            await this.redis.hset(stateKey, 'tokens', newCurrentLimit, 'refilledAt', new Date().toISOString())
+        }
+
+        await this.redis.del(lockKey)
+        await onSuccess()
     }
 
     generateInitialConfig(config) {
         return {
+            name: config.name,
             limit: config.limit,
             tokens: config.limit,
             refillCount: config.refillCount,
