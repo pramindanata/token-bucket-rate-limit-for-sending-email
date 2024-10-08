@@ -18,7 +18,7 @@ async function main() {
                 name: 'emailA',
                 limit: 5,
                 refillCount: 2,
-                refillIntervalMs: 5 * 1000,
+                refillIntervalMs: 100,
             },
             // {
             //     name: 'emailB',
@@ -60,7 +60,7 @@ async function runScenario(rateLimiter, key) {
     await consume(6, rateLimiter, key)
 
     logWithTimestamp(`${key} - Sleep for 5s`)
-    await sleep(15000)
+    await sleep(5000)
 
     // await consume(7, rateLimiter, key)
     // await consume(8, rateLimiter, key)
@@ -112,18 +112,18 @@ class RateLimiter {
         const currentTimestamp = new Date()
 
         for (const email of this.emails) {
-            // TODO lock start so only 1 process can start
+            // TODO lock start so only 1 process can start. Use retry backoff.
             const key = this.generateKey(email.name)
-            let finalEmailConfig = await this.redis.hgetall(key)
+            let config = await this.redis.hgetall(key)
             let initialTimeout = 0
 
-            if (Object.keys(finalEmailConfig).length === 0) {
-                finalEmailConfig =  this.generateInitialConfig(email)
-                initialTimeout = finalEmailConfig.refillIntervalMs
+            if (Object.keys(config).length === 0) {
+                config = this.generateInitialConfig(email)
+                initialTimeout = config.refillIntervalMs
 
-                await this.redis.hset(key, finalEmailConfig)
+                await this.redis.hset(key, config)
             } else {
-                initialTimeout = parseInt(finalEmailConfig.refillIntervalMs) - (currentTimestamp - new Date(finalEmailConfig.refilledAt))
+                initialTimeout = parseInt(config.refillIntervalMs) - (currentTimestamp - new Date(config.refilledAt))
     
                 if (initialTimeout < 0) {
                     initialTimeout = 0
@@ -131,7 +131,7 @@ class RateLimiter {
             }
 
             setTimeout(async () => {
-                await this.refillTokensAndTriggerAgainWithTimeout(finalEmailConfig)
+                await this.refillTokensAndTriggerAgainWithTimeout(config)
             }, initialTimeout)
         }
     }
@@ -187,8 +187,9 @@ class RateLimiter {
     
     async refillTokensAndTriggerAgainWithTimeout(config) {
         await this.refillTokens(config)
-
+        
         setTimeout(async () => {
+
             await this.refillTokensAndTriggerAgainWithTimeout(config)
         }, config.refillIntervalMs)
     }
@@ -213,7 +214,6 @@ class RateLimiter {
     }
 
     async consumeToken(key) {
-        // TODO cek lock refill, jika ada maka pause
         const refillLockReleased = await this.isRefillLockReleased(key)
 
         if (!refillLockReleased) {
