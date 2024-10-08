@@ -16,9 +16,9 @@ async function main() {
         emails: [
             {
                 name: 'emailA',
-                limit: 5,
-                refillCount: 2,
-                refillIntervalMs: 100,
+                limit: 10,
+                refillCount: 3,
+                refillIntervalMs: 5000,
             },
             // {
             //     name: 'emailB',
@@ -128,6 +128,15 @@ class RateLimiter {
                 if (initialTimeout < 0) {
                     initialTimeout = 0
                 }
+
+                await this.redis.hset(
+                    key, 
+                    'name', email.name,
+                    'limit', email.limit,
+                    'tokens', email.limit,
+                    'refillCount', email.refillCount,
+                    'refillIntervalMs', email.refillIntervalMs,
+                )
             }
 
             setTimeout(async () => {
