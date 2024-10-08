@@ -106,7 +106,7 @@ class RateLimiter {
 
                 // TODO pakai transaction dan pasang lock supaya consume token yg lain pause.
                 const lockKey = this.generateRefillLockKey(email.name)
-                const lockExpirationTimeMs = 5 * 1000 
+                const lockExpirationTimeMs = 20 * 1000 
                 const lock = await this.redis.set(lockKey, "lock", 'NX', 'PX', lockExpirationTimeMs)
                 
                 if (lock !== 'OK') {
@@ -165,7 +165,7 @@ class RateLimiter {
 
     async consumeToken(key) {
         // TODO cek lock refill, jika ada maka pause
-        const refillLockReleased = await this.isRefillLockReleased()
+        const refillLockReleased = await this.isRefillLockReleased(key)
 
         if (!refillLockReleased) {
             logWithTimestamp("CANT CONSUME. LOCKED BY REFILL.")
@@ -195,7 +195,7 @@ class RateLimiter {
         async function check() {
             const lockKey = this.generateRefillLockKey(key)
             const lock = await this.redis.get(lockKey)
-    
+
             if (lock === 'lock') {
                 if (attempts >= maxAttempts) {
                     return false
@@ -203,13 +203,13 @@ class RateLimiter {
 
                 attempts += 1
                 await sleep(initialSleepMs * 2)
-                return check()
+                return check.apply(this, [])
             }
 
             return true
         }
 
-        return check.bind(this)()
+        return check.apply(this, [])
     }
 }
 
