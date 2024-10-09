@@ -1,7 +1,6 @@
 const dotenv = require('dotenv')
 dotenv.config()
 
-const crypto = require('crypto')
 const Redis = require("ioredis")
 
 async function main() {
@@ -111,6 +110,8 @@ class RateLimiter {
     async start() {
         const currentTimestamp = new Date()
 
+        // TODO use promise.all
+        // TODO add expiration time per state and refresh it every refill
         for (const email of this.emails) {
             // TODO lock start so only 1 process can start. Use retry backoff.
             const key = this.generateKey(email.name)
@@ -198,7 +199,6 @@ class RateLimiter {
         await this.refillTokens(config)
         
         setTimeout(async () => {
-
             await this.refillTokensAndTriggerAgainWithTimeout(config)
         }, config.refillIntervalMs)
     }
